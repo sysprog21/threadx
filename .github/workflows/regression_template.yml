@@ -77,7 +77,7 @@ jobs:
       run: ${{ inputs.test_script }}
       
     - name: Publish Test Results
-      uses: EnricoMi/publish-unit-test-result-action@v2.11.0
+      uses: EnricoMi/publish-unit-test-result-action@v2.18.0
       if: always()
       with:
         check_name: Test Results ${{ inputs.result_affix }}
@@ -93,7 +93,7 @@ jobs:
           ${{ inputs.cmake_path }}/build/*.txt
           ${{ inputs.cmake_path }}/build/*/Testing/**/*.xml
           ${{ inputs.cmake_path }}/build/**/regression/output_files/*.bin
-    
+
     - name: Configure GitHub Pages
       uses: actions/configure-pages@v5.0.0
 
