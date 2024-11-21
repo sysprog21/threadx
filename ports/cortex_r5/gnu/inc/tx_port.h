@@ -287,9 +287,9 @@ unsigned int   _tx_thread_interrupt_restore(UINT old_posture);
 #define TX_INTERRUPT_SAVE_AREA                  UINT interrupt_save;
 
 #ifdef TX_ENABLE_FIQ_SUPPORT
-#define TX_DISABLE                              asm volatile (" MRS %0,CPSR; CPSID if ": "=r" (interrupt_save) );
+#define TX_DISABLE                              asm volatile (" MRS %0,CPSR; CPSID if ": "=r" (interrupt_save) : : "memory", "cc");
 #else
-#define TX_DISABLE                              asm volatile (" MRS %0,CPSR; CPSID i ": "=r" (interrupt_save) );
+#define TX_DISABLE                              asm volatile (" MRS %0,CPSR; CPSID i ": "=r" (interrupt_save) : : "memory", "cc");
 #endif
 
 #define TX_RESTORE                              asm volatile (" MSR CPSR_c,%0 "::"r" (interrupt_save) );
