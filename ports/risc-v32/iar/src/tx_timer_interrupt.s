@@ -230,4 +230,3 @@ _tx_timer_nothing_expired:
 
 /* }  */
     END
-    

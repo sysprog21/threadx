@@ -124,4 +124,3 @@ memory_set_done:
   .section .stack, "wa", %nobits
   .section .stack_process, "wa", %nobits
   .section .heap, "wa", %nobits
-  

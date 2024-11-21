@@ -90,4 +90,3 @@ _tx_thread_interrupt_control:
     ret
 /* }  */
     END
-    

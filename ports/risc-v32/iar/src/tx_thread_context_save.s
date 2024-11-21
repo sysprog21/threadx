@@ -259,4 +259,3 @@ _tx_thread_idle_system_save:
     ret                                                 ; Return to calling ISR
 
     END
-    

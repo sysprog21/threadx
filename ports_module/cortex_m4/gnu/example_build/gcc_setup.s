@@ -124,4 +124,3 @@ memory_set_done:
 
     /* Setup attibutes of heap section so it doesn't take up room in the elf file */
     .section .heap, "wa", %nobits
-  
