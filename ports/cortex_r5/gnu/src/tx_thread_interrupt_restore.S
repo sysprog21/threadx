@@ -87,7 +87,9 @@ _tx_thread_interrupt_restore:
 @
 @    /* Apply the new interrupt posture.  */
 @
+    DMB                                         @ Memory barrier (release semantics)
     MSR     CPSR_c, r0                          @ Setup new CPSR
+    ISB                                         @ Synchronize context
 #ifdef __THUMB_INTERWORK
     BX      lr                                  @ Return to caller
 #else

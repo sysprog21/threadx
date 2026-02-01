@@ -93,8 +93,10 @@ _tx_thread_interrupt_disable:
 #ifdef TX_ENABLE_FIQ_SUPPORT
     CPSID   if                                  @ Disable IRQ and FIQ
 #else
-    CPSID   i                                   @ Disable IRQ 
+    CPSID   i                                   @ Disable IRQ
 #endif
+    DMB                                         @ Memory barrier (acquire semantics)
+    ISB                                         @ Flush pipeline
 
 #ifdef __THUMB_INTERWORK
     BX      lr                                  @ Return to caller
