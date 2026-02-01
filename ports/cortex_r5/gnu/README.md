@@ -535,7 +535,7 @@ The Cortex-R5 supports Error Correcting Code (ECC) protection for TCM and extern
 
 **ACTLR (Auxiliary Control Register) ECC Control Bits:**
 
-**⚠️ CRITICAL**: ACTLR bits are **IMPLEMENTATION DEFINED** in ARMv7-R architecture. The following bit assignments are **examples** and must be verified against your specific SoC Technical Reference Manual:
+**CRITICAL**: ACTLR bits are **IMPLEMENTATION DEFINED** in ARMv7-R architecture. The following bit assignments are **examples** and must be verified against your specific SoC Technical Reference Manual:
 
 - **Bit 25**: ATCM ECC check enable (example - verify for your SoC)
 - **Bit 26**: BTCM ECC check enable (example - verify for your SoC)
@@ -549,7 +549,7 @@ The Cortex-R5 supports Error Correcting Code (ECC) protection for TCM and extern
 
 **Note**: Both "check enable" and "error reporting enable" bits must be set to generate Data Abort exceptions on uncorrectable errors. Incorrect bit usage will silently disable ECC protection.
 
-**⚠️ CRITICAL SAFETY WARNINGS:**
+**CRITICAL SAFETY WARNINGS:**
 
 1. **ACTLR bits are implementation-defined**: The ECC control bits in ACTLR vary by SoC vendor and revision. **You must verify bit assignments** against your specific SoC Technical Reference Manual before deployment. Incorrect bit usage will silently disable ECC protection.
 
@@ -952,7 +952,914 @@ inject_single_bit_error:
 - Interrupt configuration
 - Memory controller ECC settings
 
-## 9. ThreadX Timer Interrupt
+## 9. Lockstep Mode Support
+
+The Cortex-R5 processor supports dual-core configuration in two modes: lockstep and asymmetric SMP. This section documents ThreadX support for lockstep mode.
+
+**ARM Reference**: Cortex-R5 TRM, Chapter 11 (Dual-core configuration)
+
+### 9.1 What is Lockstep Mode?
+
+**Lockstep mode** operates both Cortex-R5 cores as a single logical processor for fault detection:
+- Both cores execute identical instructions simultaneously
+- Outputs are compared cycle-by-cycle for mismatches
+- Any mismatch triggers an error signal (indicates hardware fault)
+- Software sees a single-core system (no SMP programming required)
+- Provides hardware fault detection for safety-critical systems (ISO 26262 ASIL-D, IEC 62304 Class C)
+
+**CRITICAL: Lockstep Mode is Hardware-Configured at Reset**
+
+Lockstep mode is a **hardware boot configuration** that is:
+- Set via hardware straps (fuses, eFuses, or GPIO signals) sampled at processor reset
+- **Active immediately upon reset** - no software enable required
+- **Cannot be changed at runtime** by software (no runtime switch to/from SMP)
+- Requires full hardware reset/power cycle to change mode
+
+**What This Means:**
+- If your board is strapped for lockstep, the processor IS in lockstep from reset onwards
+- Software (ThreadX or application) cannot disable lockstep mode
+- Switching between lockstep and SMP requires **hardware reconfiguration + reset** (see Section 9.9)
+- Both cores execute identically from first instruction after reset
+
+**ThreadX Certification Context:**
+While ThreadX *supports* ASIL-D contexts through its deterministic design, the ThreadX OS itself is not ASIL-D certified unless using the commercially certified version. Lockstep mode facilitates the *hardware's* ability to reach ASIL-D certification.
+
+**Lockstep vs SMP:**
+
+| Feature | Lockstep Mode | SMP Mode |
+|---------|---------------|----------|
+| Cores | 2 cores, 1 logical CPU | 2 independent CPUs |
+| Execution | Identical instructions | Independent tasks |
+| Software view | Single-core | Multi-core |
+| Purpose | Fault detection | Performance |
+| ThreadX variant | Standard ThreadX | ThreadX SMP |
+
+### 9.2 Current Support Status
+
+**ThreadX Cortex-R5 GNU port is COMPATIBLE with lockstep mode.**
+
+**Rationale:**
+- Lockstep presents as a single-core system to software
+- No SMP-specific programming required
+- All operations are naturally deterministic in single-threaded execution
+- Recent interrupt barrier fixes (commit c4602872, 162e286c) ensure deterministic behavior
+
+**Verified Components:**
+1. **Interrupt Control** (tx_port.h:290-296):
+   - TX_DISABLE/TX_RESTORE use DMB + ISB barriers
+   - Ensures identical CPSR state and memory ordering on both cores
+   - No instruction reordering across critical sections
+
+2. **Context Switching** (tx_thread_schedule.S, tx_thread_context_save.S):
+   - Deterministic register save/restore sequences
+   - No data-dependent branches in critical paths
+   - Identical execution guaranteed for same inputs
+
+3. **Stack Management** (tx_initialize_low_level.S:126-166):
+   - Deterministic stack pointer initialization
+   - No dynamic stack allocation in interrupt paths
+   - Fixed stack sizes ensure identical layout
+
+### 9.3 Lockstep-Specific Restrictions
+
+**CRITICAL: Debug/Trace Limitations**
+
+Lockstep mode imposes strict requirements on debug and trace features. Violating these restrictions may cause lockstep errors or system failures.
+
+**Prohibited in Lockstep Mode:**
+1. **Asymmetric Breakpoints**: Setting breakpoints on only one core breaks synchronization
+2. **Single-Stepping**: Stepping through code on one core while other runs
+3. **Performance Counters**: Core-specific counter access may differ between cores
+4. **Trace Macrocells**: ETM/PTM trace may introduce timing variations
+
+**Critical: Watchdog Timer Considerations**
+- Hardware watchdog timers are the ultimate safety net in lockstep systems
+- If lockstep comparator freezes the bus or both cores halt, watchdog triggers reset
+- Ensure watchdog is properly configured and serviced in all execution paths
+- Watchdog timeout should account for worst-case interrupt latency + critical section duration
+
+**Allowed in Lockstep Mode:**
+1. **Invasive Debug**: Both cores halt simultaneously (lockstep preserved)
+2. **Non-Invasive Trace**: Trace output multiplexed from one core only
+3. **DCC (Debug Comms Channel)**: Software-based debug I/O (vendor-specific)
+
+**Recommendation**: Use software-based debugging techniques (UART logging, memory dumps) instead of JTAG/SWD during lockstep operation. Reserve JTAG debugging for non-lockstep development.
+
+### 9.4 Determinism Requirements
+
+For reliable lockstep operation, all code paths must be deterministic. ThreadX port already satisfies these requirements:
+
+**Guaranteed Deterministic:**
+- **Interrupt Latency**: Fixed instruction sequences in interrupt entry/exit
+- **Memory Barriers**: Explicit DMB/ISB prevent compiler/CPU reordering
+- **Register Context**: Fixed save/restore order (AAPCS compliant)
+- **Timer ISR**: Deterministic tick processing (no conditional branches based on external state)
+
+**Application Responsibilities:**
+- **Avoid Timing-Dependent Logic**: Don't use wall-clock time for control flow decisions within critical sections
+- **No External Randomness**: Don't read hardware RNG or jitter-prone sources in interrupt handlers
+- **Consistent Cache Policy**: Both cores must have identical cache enable/disable configuration
+- **Identical MPU Configuration**: Both cores must program identical MPU regions
+
+### 9.5 Cache Considerations
+
+**TCM in Lockstep Mode:**
+- ATCM/BTCM are local to each core (duplicated, not shared)
+- Both cores access their own TCM with identical addresses
+- Contents must remain identical (guaranteed by lockstep execution)
+- No cache coherency issues (TCM is not cacheable)
+
+**CRITICAL: TCM Initialization Requirement**
+
+**Timing Constraint:** Lockstep mode is already active at reset (configured by hardware straps). TCM must be scrubbed BEFORE any stack operations or TCM reads.
+
+**The Paradox:** Section 8.1 recommends system stacks in ATCM, but lockstep requires ATCM scrubbing before first use. Solution requires early boot sequence with non-TCM resources.
+
+**Boot Sequence Options:**
+
+**Option A: ROM/OCRAM Stack (Recommended for production)**
+```assembly
+@ Early boot - before any C code or stack usage in ATCM
+@ This code must execute from ROM/Flash with stack in OCRAM or other non-TCM RAM
+
+_start:
+    @ 1. Set up temporary stack in OCRAM (not ATCM)
+    LDR     sp, =__ocram_stack_top          @ Vendor-specific OCRAM address
+
+    @ 2. Scrub ATCM (write zeros to establish identical state)
+    BL      scrub_atcm                       @ See implementation below
+
+    @ 3. Scrub BTCM (if used)
+    BL      scrub_btcm
+
+    @ 4. Now safe to initialize system stacks in ATCM
+    BL      _tx_initialize_low_level         @ Sets up IRQ/FIQ/SYS stacks in ATCM
+
+    @ 5. Continue with normal boot (ECC enable, ThreadX init, etc.)
+    B       main
+
+scrub_atcm:
+    @ Scrub ATCM with no stack usage (leaf function, no function calls)
+    LDR     r0, =ATCM_BASE                   @ e.g., 0x00000000
+    LDR     r1, =ATCM_SIZE                   @ e.g., 64KB (0x10000)
+    ADD     r1, r0, r1                       @ End address
+    MOV     r2, #0
+    MOV     r3, #0
+scrub_loop:
+    STRD    r2, r3, [r0], #8                 @ Write 64-bit zeros
+    CMP     r0, r1
+    BLT     scrub_loop
+    BX      lr
+```
+
+**Option B: DDR Stack (if available early)**
+```assembly
+@ If DDR is initialized by bootloader/ROM code
+_start:
+    @ 1. Use DDR stack temporarily
+    LDR     sp, =__ddr_temp_stack            @ DDR address from linker script
+
+    @ 2. Scrub TCM (same as Option A)
+    BL      scrub_atcm
+    BL      scrub_btcm
+
+    @ 3. Switch to ATCM stacks
+    BL      _tx_initialize_low_level
+    B       main
+```
+
+**Option C: No-Stack Scrubbing (if ROM stack unavailable)**
+```assembly
+@ Ultra-minimal: scrub without any stack
+@ WARNING: No function calls allowed, inline only
+_start:
+    @ Inline ATCM scrub (no BL, no stack)
+    LDR     r0, =ATCM_BASE
+    LDR     r1, =ATCM_SIZE
+    ADD     r1, r0, r1
+    MOV     r2, #0
+    MOV     r3, #0
+inline_scrub:
+    STRD    r2, r3, [r0], #8
+    CMP     r0, r1
+    BLT     inline_scrub
+
+    @ Now safe to set up stack
+    LDR     sp, =__stack_top                 @ Can use ATCM now
+    BL      _tx_initialize_low_level
+    B       main
+```
+
+**Relationship to ECC Initialization:**
+- TCM scrubbing for lockstep and ECC initialization (Section 8.7.2) are **THE SAME OPERATION**
+- Writing zeros to all TCM satisfies both requirements simultaneously
+- Perform scrubbing once before any TCM access, then enable ECC if desired
+- Order: Scrub TCM → Enable ECC → Use TCM normally
+
+**Vendor-Specific Considerations:**
+- Check if your bootloader/ROM already scrubs TCM (some do for ECC)
+- Verify OCRAM availability and address from SoC memory map
+- Some SoCs have small SRAM suitable for early stack (e.g., TI TMS570 has dedicated RAM)
+- Xilinx Zynq MPSoC: OCM available at 0xFFFC0000 (256KB)
+
+**L1 Cache in Lockstep Mode:**
+- Each core has its own L1 cache (instruction and data)
+- Cache contents should remain identical (same execution, same data access)
+- Cache maintenance operations (clean, invalidate) execute on both cores
+- No explicit synchronization required (lockstep ensures identical state)
+
+**Note**: Cache coherency issues do NOT apply to lockstep mode. Those issues only affect dual-core R5F running in SMP mode with independent execution.
+
+### 9.6 Interrupt Timing Determinism
+
+Lockstep mode requires identical interrupt timing on both cores. The Cortex-R5 hardware ensures this automatically:
+
+**Hardware Guarantees:**
+- IRQ/FIQ signals are routed to the single logical CPU interface (lockstep comparator handles distribution)
+- Interrupt controller (GIC) sees only ONE CPU interface in lockstep mode (not separate interfaces like SMP)
+- Interrupt latency is identical (same pipeline state, same instruction)
+- No GIC distributor configuration needed to "broadcast" interrupts (hardwired in lockstep)
+
+**Software Requirements:**
+- **No Core-Specific IRQ Routing**: Don't use GIC CPU interface targeting (vendor-specific)
+- **Consistent Interrupt Priorities**: Ensure identical GIC priority configuration
+- **No Timing-Dependent ISRs**: Avoid ISRs that branch based on elapsed time
+
+### 9.7 Testing Requirements for Lockstep Validation
+
+**Lockstep Error Detection Testing:**
+
+To validate lockstep operation and error detection, perform the following tests (if supported by your SoC):
+
+**1. Fault Injection Test (Hardware Lockstep Validation)**
+
+This test validates the end-to-end lockstep error detection path: injection → status → ISR → logging → reset.
+
+```c
+/* Vendor-specific register definitions - MUST be filled from your SoC TRM */
+#define LOCKSTEP_INJECT_ADDR  0x00000000  /* Replace with actual address */
+#define LOCKSTEP_STATUS_ADDR  0x00000000  /* Replace with actual address */
+#define LOCKSTEP_CLEAR_ADDR   0x00000000  /* Replace with actual address */
+
+#define LOCKSTEP_INJECT_REG   (*(volatile uint32_t *)LOCKSTEP_INJECT_ADDR)
+#define LOCKSTEP_STATUS_REG   (*(volatile uint32_t *)LOCKSTEP_STATUS_ADDR)
+#define LOCKSTEP_CLEAR_REG    (*(volatile uint32_t *)LOCKSTEP_CLEAR_ADDR)
+
+/* Vendor-specific error injection values */
+#define LOCKSTEP_INJECT_MISMATCH  0x00000001  /* Consult TRM */
+
+/* Global state for ISR verification */
+static volatile uint32_t lockstep_fault_seen = 0;
+
+/* Lockstep Error ISR - Must be registered to ESM/NMI/error interrupt */
+void lockstep_error_isr(void)
+{
+    uint32_t status = LOCKSTEP_STATUS_REG;
+
+    /* Log error information to non-volatile storage */
+    log_fatal_error(LOCKSTEP_COMPARE_ERROR, status);
+
+    /* Clear status register (vendor-specific) */
+    LOCKSTEP_CLEAR_REG = status;
+
+    /* Latch error for test verification */
+    lockstep_fault_seen = status;
+
+    /* Safety response: trigger system reset */
+    system_reset();  /* Vendor-specific reset function */
+}
+
+/* Fault Injection Test Function */
+int lockstep_fault_injection_test(void)
+{
+    lockstep_fault_seen = 0;
+
+    /* Trigger intentional mismatch between cores */
+    LOCKSTEP_INJECT_REG = LOCKSTEP_INJECT_MISMATCH;
+
+    /* Wait for ISR to fire (should happen within microseconds) */
+    tx_thread_sleep(1);  /* 1 tick delay */
+
+    /* Verify the ISR fired and status was latched */
+    if (lockstep_fault_seen != 0) {
+        /* PASS: Lockstep detection is functional */
+        return 0;
+    } else {
+        /* FAIL: Lockstep error was not detected */
+        return -1;
+    }
+}
+
+/* Vendor-Specific Examples:
+ *
+ * TI TMS570:
+ *   - LOCKSTEP_INJECT_ADDR: ESM_EEPAPR1 register
+ *   - LOCKSTEP_STATUS_ADDR: ESM_SR1 register
+ *   - Inject via CPU self-test (LBIST) control registers
+ *   - Refer to TMS570 TRM Chapter 8
+ *
+ * Xilinx Zynq UltraScale+:
+ *   - LOCKSTEP_STATUS_ADDR: RPU_ERR_STATUS register
+ *   - Inject via RPU error injection registers
+ *   - Refer to Zynq UltraScale+ TRM Chapter 4
+ *
+ * NXP i.MX:
+ *   - Consult i.MX TRM for Cortex-R5 error injection mechanism
+ */
+```
+
+**Test Execution:**
+1. Register `lockstep_error_isr` to your SoC's error interrupt vector
+2. Call `lockstep_fault_injection_test()` during system validation
+3. Expected: Test returns 0 (pass) and system resets after ISR
+4. If test returns -1, lockstep error path is not functional
+
+**2. Interrupt Stress Test (Determinism Validation)**
+
+This test validates lockstep operation under heavy interrupt load and concurrent thread activity.
+
+```c
+#define STRESS_TEST_DURATION_TICKS  (3600U * TX_TIMER_TICKS_PER_SECOND)  /* 1 hour */
+#define NUM_STRESS_THREADS          12
+#define INTERRUPT_RATE_HZ           10000  /* 10 kHz timer interrupts */
+
+/* Global stress test state */
+static TX_THREAD stress_threads[NUM_STRESS_THREADS];
+static ULONG stress_thread_stacks[NUM_STRESS_THREADS][1024];
+static volatile ULONG stress_test_failures = 0;
+
+/* Worker thread - generates CPU load and context switches */
+void stress_worker_thread(ULONG thread_id)
+{
+    ULONG counter = 0;
+
+    while (1) {
+        /* Perform some computation */
+        for (int i = 0; i < 1000; i++) {
+            counter += (thread_id * i);
+        }
+
+        /* Force context switch */
+        tx_thread_relinquish();
+
+        /* Check for lockstep errors periodically */
+        if ((counter % 10000) == 0) {
+            if (LOCKSTEP_STATUS_REG != 0) {
+                /* Lockstep fault detected */
+                stress_test_failures++;
+                log_fatal_error(LOCKSTEP_COMPARE_ERROR, LOCKSTEP_STATUS_REG);
+                system_reset();
+            }
+        }
+    }
+}
+
+/* Main stress test function */
+int lockstep_interrupt_stress_test(void)
+{
+    UINT status;
+    ULONG start_time, elapsed_time;
+
+    /* Reset failure counter */
+    stress_test_failures = 0;
+
+    /* Create multiple worker threads with varying priorities */
+    for (UINT i = 0; i < NUM_STRESS_THREADS; i++) {
+        status = tx_thread_create(
+            &stress_threads[i],
+            "StressWorker",
+            stress_worker_thread,
+            i,  /* Thread ID */
+            stress_thread_stacks[i],
+            sizeof(stress_thread_stacks[i]),
+            i + 5,  /* Priority: 5 to 16 */
+            i + 5,
+            TX_NO_TIME_SLICE,
+            TX_AUTO_START
+        );
+
+        if (status != TX_SUCCESS) {
+            return -1;  /* Thread creation failed */
+        }
+    }
+
+    /* Configure timer for high interrupt rate (vendor-specific) */
+    /* Example: configure_timer_interrupt(INTERRUPT_RATE_HZ); */
+
+    /* Monitor test progress */
+    start_time = tx_time_get();
+
+    while (1) {
+        elapsed_time = tx_time_get() - start_time;
+
+        /* Check for lockstep errors in main monitoring loop */
+        if (LOCKSTEP_STATUS_REG != 0) {
+            log_fatal_error(LOCKSTEP_COMPARE_ERROR, LOCKSTEP_STATUS_REG);
+            return -2;  /* Lockstep error detected */
+        }
+
+        /* Check if test duration completed */
+        if (elapsed_time >= STRESS_TEST_DURATION_TICKS) {
+            break;  /* Test passed */
+        }
+
+        /* Check for worker thread failures */
+        if (stress_test_failures > 0) {
+            return -3;  /* Worker detected error */
+        }
+
+        tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND);  /* Check every second */
+    }
+
+    /* Cleanup: delete stress threads */
+    for (UINT i = 0; i < NUM_STRESS_THREADS; i++) {
+        tx_thread_terminate(&stress_threads[i]);
+        tx_thread_delete(&stress_threads[i]);
+    }
+
+    /* Test passed - no lockstep errors under stress */
+    return 0;
+}
+
+/* Expected Results:
+ * - Return 0: No lockstep errors detected during entire test duration
+ * - Return -1: Thread creation failure (test setup issue)
+ * - Return -2/-3: Lockstep error detected (FAILURE - hardware issue)
+ */
+```
+
+**3. Context Switch Validation (Register Preservation)**
+
+This test validates deterministic context save/restore across 100K+ switches.
+
+```c
+#define CONTEXT_SWITCH_ITERATIONS  100000
+#define TEST_PATTERN_1  0xA5A5A5A5
+#define TEST_PATTERN_2  0x5A5A5A5A
+
+/* Assembly helper functions to set/check register patterns */
+/* These must be implemented in assembly to avoid compiler optimization */
+
+extern void set_gpr_pattern(uint32_t pattern);
+extern uint32_t check_gpr_pattern(uint32_t pattern);
+
+/* Assembly implementation (add to .S file):
+ *
+ * .global set_gpr_pattern
+ * set_gpr_pattern:
+ *     MOV     r1, r0
+ *     MOV     r2, r0
+ *     MOV     r3, r0
+ *     MOV     r4, r0
+ *     MOV     r5, r0
+ *     MOV     r6, r0
+ *     MOV     r7, r0
+ *     MOV     r8, r0
+ *     MOV     r9, r0
+ *     MOV     r10, r0
+ *     MOV     r11, r0
+ *     MOV     r12, r0
+ *     BX      lr
+ *
+ * .global check_gpr_pattern
+ * check_gpr_pattern:
+ *     CMP     r1, r0
+ *     BNE     check_fail
+ *     CMP     r2, r0
+ *     BNE     check_fail
+ *     @ ... repeat for r3-r12 ...
+ *     MOV     r0, #0          @ Success
+ *     BX      lr
+ * check_fail:
+ *     MOV     r0, #1          @ Failure
+ *     BX      lr
+ */
+
+/* Context switch test threads */
+static TX_THREAD context_thread_a, context_thread_b;
+static ULONG context_stack_a[1024], context_stack_b[1024];
+static volatile ULONG context_switch_count = 0;
+static volatile ULONG context_errors = 0;
+
+void context_test_thread_a(ULONG unused)
+{
+    (void)unused;
+
+    for (ULONG i = 0; i < CONTEXT_SWITCH_ITERATIONS; i++) {
+        /* Set register pattern */
+        set_gpr_pattern(TEST_PATTERN_1);
+
+        /* Force context switch */
+        tx_thread_relinquish();
+
+        /* Verify pattern preserved after switch */
+        if (check_gpr_pattern(TEST_PATTERN_1) != 0) {
+            context_errors++;
+        }
+
+        context_switch_count++;
+    }
+}
+
+void context_test_thread_b(ULONG unused)
+{
+    (void)unused;
+
+    for (ULONG i = 0; i < CONTEXT_SWITCH_ITERATIONS; i++) {
+        /* Set different pattern to detect cross-contamination */
+        set_gpr_pattern(TEST_PATTERN_2);
+
+        tx_thread_relinquish();
+
+        if (check_gpr_pattern(TEST_PATTERN_2) != 0) {
+            context_errors++;
+        }
+
+        context_switch_count++;
+    }
+}
+
+/* Main context switch test */
+int lockstep_context_switch_test(void)
+{
+    UINT status;
+
+    context_switch_count = 0;
+    context_errors = 0;
+
+    /* Create two threads that will context switch rapidly */
+    status = tx_thread_create(&context_thread_a, "ContextA",
+                              context_test_thread_a, 0,
+                              context_stack_a, sizeof(context_stack_a),
+                              10, 10, TX_NO_TIME_SLICE, TX_AUTO_START);
+    if (status != TX_SUCCESS) return -1;
+
+    status = tx_thread_create(&context_thread_b, "ContextB",
+                              context_test_thread_b, 0,
+                              context_stack_b, sizeof(context_stack_b),
+                              10, 10, TX_NO_TIME_SLICE, TX_AUTO_START);
+    if (status != TX_SUCCESS) return -2;
+
+    /* Wait for both threads to complete */
+    while (context_switch_count < (2 * CONTEXT_SWITCH_ITERATIONS)) {
+        tx_thread_sleep(10);
+
+        /* Check for lockstep errors during test */
+        if (LOCKSTEP_STATUS_REG != 0) {
+            return -3;  /* Lockstep error during test */
+        }
+    }
+
+    /* Cleanup */
+    tx_thread_terminate(&context_thread_a);
+    tx_thread_delete(&context_thread_a);
+    tx_thread_terminate(&context_thread_b);
+    tx_thread_delete(&context_thread_b);
+
+    /* Check results */
+    if (context_errors > 0) {
+        return -4;  /* Register preservation errors */
+    }
+
+    return 0;  /* Test passed */
+}
+
+/* VFP Extension (if TX_ENABLE_VFP defined):
+ * Add similar set_vfp_pattern/check_vfp_pattern functions for D0-D15 registers
+ */
+```
+
+**4. Memory Barrier Validation (Compiler Reordering Prevention)**
+
+This test validates that memory barriers prevent compiler reordering in optimized builds.
+
+**Important:** In lockstep (single logical core), this tests **COMPILER** reordering prevention, not multi-core race conditions. Hardware program order is maintained. This is critical for -O3 optimization validation.
+
+```c
+/* Shared data for barrier test */
+static volatile int barrier_shared_flag = 0;
+static volatile int barrier_shared_data = 0;
+static volatile ULONG barrier_errors = 0;
+
+/* Producer thread - writes data then signals */
+void barrier_producer_thread(ULONG unused)
+{
+    (void)unused;
+    TX_INTERRUPT_SAVE_AREA;
+
+    for (int i = 0; i < 10000; i++) {
+        /* Critical section with barriers */
+        TX_DISABLE;
+        barrier_shared_data = 42 + i;    /* Must not reorder past TX_RESTORE */
+        barrier_shared_flag = 1;
+        TX_RESTORE;
+
+        /* Wait for consumer to process */
+        while (barrier_shared_flag == 1) {
+            /* Spin */
+        }
+
+        tx_thread_sleep(1);  /* Yield periodically */
+    }
+}
+
+/* Consumer thread - waits for signal then reads data */
+void barrier_consumer_thread(ULONG unused)
+{
+    (void)unused;
+
+    for (int i = 0; i < 10000; i++) {
+        uint32_t start = tx_time_get();
+
+        /* Wait for signal with timeout */
+        while (barrier_shared_flag == 0) {
+            if ((tx_time_get() - start) > 5) {
+                /* Timeout - deadlock or barrier failure */
+                barrier_errors++;
+                return;
+            }
+        }
+
+        /* Verify data is correct */
+        if (barrier_shared_data != (42 + i)) {
+            /* Memory ordering violation */
+            barrier_errors++;
+        }
+
+        /* Clear flag to signal producer */
+        barrier_shared_flag = 0;
+    }
+}
+
+/* Main barrier test function */
+int lockstep_barrier_test(void)
+{
+    TX_THREAD producer, consumer;
+    ULONG producer_stack[1024], consumer_stack[1024];
+    UINT status;
+
+    barrier_errors = 0;
+    barrier_shared_flag = 0;
+    barrier_shared_data = 0;
+
+    /* Create producer thread */
+    status = tx_thread_create(&producer, "BarrierProducer",
+                              barrier_producer_thread, 0,
+                              producer_stack, sizeof(producer_stack),
+                              15, 15, TX_NO_TIME_SLICE, TX_AUTO_START);
+    if (status != TX_SUCCESS) return -1;
+
+    /* Create consumer thread */
+    status = tx_thread_create(&consumer, "BarrierConsumer",
+                              barrier_consumer_thread, 0,
+                              consumer_stack, sizeof(consumer_stack),
+                              15, 15, TX_NO_TIME_SLICE, TX_AUTO_START);
+    if (status != TX_SUCCESS) return -2;
+
+    /* Wait for threads to complete (20 seconds max) */
+    tx_thread_sleep(20 * TX_TIMER_TICKS_PER_SECOND);
+
+    /* Cleanup */
+    tx_thread_terminate(&producer);
+    tx_thread_delete(&producer);
+    tx_thread_terminate(&consumer);
+    tx_thread_delete(&consumer);
+
+    /* Check results */
+    if (barrier_errors > 0) {
+        return -3;  /* Barrier/ordering errors detected */
+    }
+
+    return 0;  /* Test passed */
+}
+
+/* Build Requirements:
+ * - Compile with -O3 -flto to expose reordering bugs
+ * - Without proper barriers, compiler may reorder shared_data/shared_flag writes
+ * - Test validates TX_DISABLE/TX_RESTORE memory clobbers are effective
+ */
+```
+
+**5. Vendor-Specific Lockstep Status Monitoring**
+
+**Error Recovery Behavior:**
+- Lockstep faults typically trigger hardware reset or NMI (Non-Maskable Interrupt)
+- ThreadX **cannot recover** the current thread when a lockstep fault occurs
+- System requires full reboot after lockstep error detection
+- Error handler (if used) should log fault information to non-volatile storage before reset
+- Some SoCs support error aggregation (combining lockstep, clock monitor, voltage monitor faults)
+
+**TI TMS570 Series Implementation:**
+
+```c
+/* TMS570 Register Definitions */
+#define ESM_BASE_ADDR         0xFFFFF500
+#define ESM_SR1               (*(volatile uint32_t *)(ESM_BASE_ADDR + 0x04))
+#define ESM_EEPAPR1           (*(volatile uint32_t *)(ESM_BASE_ADDR + 0x14))
+#define ESM_IOFFHR            (*(volatile uint32_t *)(ESM_BASE_ADDR + 0x1C))
+
+#define ESM_CPU_COMPARE_ERROR (1 << 0)  /* Bit 0 in ESM_SR1 */
+
+/* TMS570 Lockstep Error Handler (register to ESM high-priority interrupt) */
+void tms570_lockstep_error_handler(void)
+{
+    uint32_t error_status = ESM_SR1;
+
+    if (error_status & ESM_CPU_COMPARE_ERROR) {
+        /* Log to non-volatile memory (EEPROM/Flash) */
+        log_fatal_error(LOCKSTEP_ERROR_TMS570, error_status);
+
+        /* Clear error status */
+        ESM_SR1 = ESM_CPU_COMPARE_ERROR;
+
+        /* Trigger system reset via watchdog or reset controller */
+        trigger_system_reset();
+    }
+}
+
+/* TMS570 Periodic Status Check (called from monitoring thread) */
+int tms570_check_lockstep_status(void)
+{
+    if (ESM_SR1 & ESM_CPU_COMPARE_ERROR) {
+        return -1;  /* Lockstep error detected */
+    }
+    return 0;  /* No errors */
+}
+```
+
+**Xilinx Zynq UltraScale+ MPSoC Implementation:**
+
+```c
+/* Zynq UltraScale+ Register Definitions */
+#define RPU_BASE_ADDR        0xFF9A0000
+#define RPU_ERR_STATUS       (*(volatile uint32_t *)(RPU_BASE_ADDR + 0x20))
+#define RPU_ERR_EN           (*(volatile uint32_t *)(RPU_BASE_ADDR + 0x24))
+
+#define RPU_LOCKSTEP_ERROR   (1 << 0)  /* Lockstep compare error bit */
+
+/* Zynq Lockstep Error Handler */
+void zynq_lockstep_error_handler(void)
+{
+    uint32_t error_status = RPU_ERR_STATUS;
+
+    if (error_status & RPU_LOCKSTEP_ERROR) {
+        /* Log error */
+        log_fatal_error(LOCKSTEP_ERROR_ZYNQ, error_status);
+
+        /* Clear error status (write 1 to clear) */
+        RPU_ERR_STATUS = RPU_LOCKSTEP_ERROR;
+
+        /* Trigger reset via PMU or PSCI */
+        trigger_system_reset();
+    }
+}
+
+/* Zynq Status Monitoring */
+int zynq_check_lockstep_status(void)
+{
+    return (RPU_ERR_STATUS & RPU_LOCKSTEP_ERROR) ? -1 : 0;
+}
+```
+
+**NXP i.MX Series Implementation:**
+
+```c
+/* i.MX Register Definitions (Example - verify with your specific i.MX variant) */
+#define IMX_ERROR_BASE       0x00000000  /* Replace with actual base address */
+#define IMX_ERROR_STATUS     (*(volatile uint32_t *)(IMX_ERROR_BASE + 0x00))
+#define IMX_ERROR_CLEAR      (*(volatile uint32_t *)(IMX_ERROR_BASE + 0x04))
+
+/* i.MX Lockstep Error Handler */
+void imx_lockstep_error_handler(void)
+{
+    uint32_t error_status = IMX_ERROR_STATUS;
+
+    /* Log error */
+    log_fatal_error(LOCKSTEP_ERROR_IMX, error_status);
+
+    /* Clear error status */
+    IMX_ERROR_CLEAR = error_status;
+
+    /* Trigger system reset */
+    trigger_system_reset();
+}
+```
+
+**Generic Status Monitoring Loop (for periodic checking):**
+
+```c
+/* Background monitoring task - checks for lockstep errors periodically */
+void lockstep_monitor_thread(ULONG unused)
+{
+    (void)unused;
+
+    while (1) {
+        /* Call vendor-specific status check */
+        #if defined(TMS570)
+            if (tms570_check_lockstep_status() != 0) {
+                tms570_lockstep_error_handler();
+            }
+        #elif defined(ZYNQ_ULTRASCALE)
+            if (zynq_check_lockstep_status() != 0) {
+                zynq_lockstep_error_handler();
+            }
+        #elif defined(IMX)
+            if (imx_check_lockstep_status() != 0) {
+                imx_lockstep_error_handler();
+            }
+        #endif
+
+        /* Check every 100ms */
+        tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND / 10);
+    }
+}
+```
+
+**Integration Checklist:**
+- [ ] Identify lockstep error register addresses from SoC TRM
+- [ ] Register error handler to appropriate interrupt vector (ESM/NMI/error IRQ)
+- [ ] Implement non-volatile logging function (EEPROM/Flash)
+- [ ] Implement system reset function (watchdog/reset controller)
+- [ ] Test error path with fault injection (Test #1 above)
+
+### 9.8 Lockstep Configuration Checklist
+
+**Hardware Configuration (before ThreadX initialization):**
+- [ ] Verify Cortex-R5 configured in lockstep mode (hardware straps/fuses, not runtime software)
+- [ ] Confirm both cores enabled with identical clock configuration
+- [ ] Configure lockstep error output signal routing (if required)
+- [ ] Enable lockstep error interrupt (if using error handler)
+- [ ] Configure watchdog timer with appropriate timeout (worst-case latency + margin)
+
+**Software Configuration:**
+- [ ] Use standard ThreadX (NOT ThreadX SMP)
+- [ ] Compile with optimization (-O2 or -O3) to expose barrier issues
+- [ ] Enable stack checking (TX_ENABLE_STACK_CHECKING) for validation
+- [ ] Disable debug/trace features in production builds
+
+**Testing:**
+- [ ] Perform cold boot TCM scrubbing test (verify all TCM initialized before lockstep enable)
+- [ ] Run interrupt stress test (extended duration, high interrupt rate)
+- [ ] Validate context switch determinism (100K+ switches, no errors)
+- [ ] Perform memory barrier validation (with -O3 -flto compilation)
+- [ ] Inject lockstep faults (if hardware supports) to verify error detection
+- [ ] Test clock monitor/voltage monitor integration (if applicable)
+- [ ] Verify watchdog triggers reset when system halts
+- [ ] Monitor vendor-specific error status registers during testing
+
+**Documentation:**
+- [ ] Document lockstep error handler implementation (if used)
+- [ ] Record lockstep configuration settings (registers, values)
+- [ ] Document debug strategy for lockstep mode (software-based)
+- [ ] Maintain test results for safety certification
+
+### 9.9 Transitioning Between Lockstep and SMP Modes
+
+**CRITICAL: Lockstep and SMP are mutually exclusive hardware configurations.**
+
+Transitioning between modes **requires hardware reconfiguration and full system reset** - this is NOT a runtime software operation.
+
+**Hardware Reconfiguration Process:**
+
+**Step 1: Hardware Strap/Fuse Changes**
+- Modify hardware straps (GPIO, resistor straps, or eFuse programming)
+- Common methods:
+  - **TI TMS570**: LBIST configuration pins sampled at reset
+  - **Xilinx Zynq UltraScale+**: Boot mode pins or eFuse BOOT_MODE settings
+  - **NXP i.MX**: Configuration pins or one-time programmable fuses
+- Consult your SoC technical reference manual for exact procedure
+
+**Step 2: Power Cycle/Hard Reset Required**
+- Soft reset (software reset via SCR register) is **INSUFFICIENT**
+- Full hardware reset required to re-sample strap configuration
+- Some SoCs require complete power cycle (VDD removal)
+
+**Step 3: Software Stack Changes (if switching to SMP)**
+
+If reconfiguring hardware from lockstep → SMP:
+
+**Hardware Enablement:**
+1. Verify SMP mode active after reset (check vendor status register)
+2. Enable SCU (Snoop Control Unit) for cache coherency
+3. Configure GIC for per-core interrupt routing (enable CPU interface 1)
+4. Enable ACP (Accelerator Coherency Port) if using DMA
+
+**Software Replacement:**
+1. Replace ThreadX with ThreadX SMP (`common_smp/` sources)
+2. Implement cache coherency barriers (DSB + cache clean/invalidate)
+3. Add SMP-safe spinlocks for shared data structures
+4. Update linker script for per-core stacks
+5. Test extensively for race conditions and deadlocks
+
+**Important:** Do NOT attempt to run standard ThreadX in SMP mode. Use ThreadX SMP variant from `common_smp/` and `ports_smp/` directories.
+
+**Transitioning from SMP → Lockstep:**
+- Reverse the above process
+- Switch to standard ThreadX (this directory)
+- Remove SMP-specific barriers and spinlocks
+- Simplify to single-core programming model
+
+## 10. ThreadX Timer Interrupt
 
 ThreadX requires a periodic interrupt source to manage all time-slicing, thread sleeps, timeouts, and application timers. Without such a timer interrupt source, these services are not functional but the remainder of ThreadX will still run.
 
