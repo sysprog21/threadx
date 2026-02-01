@@ -159,6 +159,8 @@ __tx_thread_no_preempt_restore:
 @    /* Pickup the saved stack pointer.  */
 @    tmp_ptr =  _tx_thread_current_ptr -> tx_thread_stack_ptr;
 @
+    LDR     sp, [r0, #8]                        @ Restore thread stack pointer
+@
 @   /* Recover the saved context and return to the point of interrupt.  */
 @
     LDMIA   sp!, {r0, r10, r12, lr}         @ Recover SPSR, POI, and scratch regs
@@ -171,6 +173,7 @@ __tx_thread_no_preempt_restore:
 @    {
 __tx_thread_preempt_restore:
 @
+    LDR     sp, [r0, #8]                        @ Restore thread stack pointer
     LDMIA   sp!, {r3, r10, r12, lr}         @ Recover temporarily saved registers
     MOV     r1, lr                          @ Save lr (point of interrupt)
     MOV     r2, #SVC_MODE                   @ Build SVC mode CPSR

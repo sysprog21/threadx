@@ -136,9 +136,13 @@ __tx_thread_not_nested_save:
 @    /* Save the current stack pointer in the thread's control block.  */
 @    _tx_thread_current_ptr -> tx_thread_stack_ptr =  sp;
 @
+    LDR     r1, =_tx_thread_system_stack_ptr    @ Pickup system stack pointer address
+    STR     sp, [r0, #8]                        @ Save thread stack pointer
+@
 @    /* Switch to the system stack.  */
 @    sp =  _tx_thread_system_stack_ptr;
 @
+    LDR     sp, [r1]                            @ Switch to system stack
     MOV     r10, #0                             @ Clear stack limit
 
 #ifdef TX_ENABLE_EXECUTION_CHANGE_NOTIFY
