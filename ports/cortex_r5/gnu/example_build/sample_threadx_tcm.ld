@@ -37,12 +37,14 @@ OUTPUT_ARCH(arm)
  * Adjust these based on your application requirements:
  *   - FIQ_STACK_SIZE: Fast Interrupt stack (typically 512-1024 bytes)
  *   - IRQ_STACK_SIZE: Standard interrupt stack (typically 1024-2048 bytes)
+ *   - SVC_STACK_SIZE: Supervisor mode stack for VFP preemption (1024 bytes minimum)
  *   - SYS_STACK_SIZE: System mode stack for nested interrupts (1024-2048 bytes)
  *
- * Total ATCM requirement: ~2560 bytes for stacks + critical data
+ * Total ATCM requirement: ~3584 bytes for stacks + critical data
  */
 FIQ_STACK_SIZE = 512;
 IRQ_STACK_SIZE = 1024;
+SVC_STACK_SIZE = 1024;  /* CRITICAL: Required for VFP context save/restore alignment */
 SYS_STACK_SIZE = 1024;  /* Only used if TX_ENABLE_IRQ_NESTING is defined */
 
 /*
@@ -113,12 +115,25 @@ SECTIONS
         _stack_sys_end = .;
     } > ATCM
 
+    /* SVC Stack - Used for interrupt preemption with VFP context switching
+     * CRITICAL: Must be 8-byte aligned for VSTMDB/VLDMIA double-precision VFP operations
+     * Context save in tx_thread_context_restore.S:205 switches to SVC mode and uses this stack
+     * Size: 1KB minimum for nested preemption with full VFP context (200 bytes per frame)
+     */
+    .stack_svc (NOLOAD) : ALIGN(8)
+    {
+        _stack_svc_start = .;
+        . += SVC_STACK_SIZE;
+        _stack_svc_end = .;
+    } > ATCM
+
     /* Export stack pointers for use in tx_initialize_low_level.S */
     _sp_irq = _stack_irq_end;
     _sp_fiq = _stack_fiq_end;
+    _sp_svc = _stack_svc_end;
     _sp_sys = _stack_sys_end;
     _stack_bottom = _stack_irq_start;
-    _stack_top = _stack_sys_end;
+    _stack_top = _stack_svc_end;
 
     /*
      * Code Sections in DDR
