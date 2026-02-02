@@ -134,27 +134,48 @@ __tx_thread_fiq_not_nested_save:
     BEQ     __tx_thread_fiq_idle_system_save    @ If so, interrupt occurred in 
 @                                               @   scheduling loop - nothing needs saving! 
 @
-@    /* Save minimal context of interrupted thread.  */
+@    /* Save minimal context of interrupted thread on thread's stack.  */
+@    /* Must switch to SYS mode and set SP before saving context */
+@    /* Stack frame ordered for RFE compatibility: r0-r3, r10, r12, PC, CPSR */
+@    /* Note: FIQ mode has banked r8-r12, so we save thread's r10/r12 from SYS mode. */
 @
-    MRS     r2, SPSR                            @ Pickup saved SPSR
-    SUB     lr, lr, #4                          @ Adjust point of interrupt
-    STMDB   sp!, {r2, lr}                       @ Store other registers, Note that we don't
-@                                               @   need to save sl and ip since FIQ has
-@                                               @   copies of these registers.  Nested
-@                                               @   interrupt processing does need to save
-@                                               @   these registers.
+@    /* Get thread's stack pointer from TCB (r0 = current thread ptr) */
+    MOV     r2, sp                              @ r2 = FIQ stack pointer (has saved r0-r3)
+    LDR     r1, [r0, #8]                        @ r1 = thread stack pointer from TCB
 @
-@    /* Save the current stack pointer in the thread's control block.  */
+@    /* Pickup SPSR and adjust return address BEFORE switching modes */
+    MRS     r3, SPSR                            @ r3 = saved SPSR
+    SUB     lr, lr, #4                          @ Adjust point of interrupt (lr_fiq)
+    MOV     r1, lr                              @ Save lr_fiq in r1 (before mode switch!)
+@
+@    /* Switch to SYS mode and set SP to thread's stack pointer */
+    CPS     #0x1F                               @ Switch to SYS mode
+    LDR     sp, [r0, #8]                        @ Load thread SP directly into sp
+@
+@    /* Save SPSR and LR to final stack positions (r2 still points to FIQ stack) */
+    STR     r3, [sp, #-4]!                      @ Push SPSR at [SP-4]
+    STR     r1, [sp, #-4]!                      @ Push lr_fiq (as PC) at [SP-8]
+@
+@    /* Now recover original r0-r3 from exception stack (r2 reg not yet modified) */
+    LDMIA   r2, {r0-r3}                         @ Recover thread's r0-r3 from FIQ stack
+@
+@    /* Save remaining registers below LR */
+    STMDB   sp!, {r0-r3, r10, r12}              @ Save r0-r3, r10, r12 (final SP = base-32)
+@
+@    /* Save the thread's stack pointer in the thread's control block.  */
 @    _tx_thread_current_ptr -> tx_thread_stack_ptr =  sp;
 @
-    LDR     r1, =_tx_thread_system_stack_ptr    @ Pickup system stack pointer address
-    STR     sp, [r0, #8]                        @ Save thread stack pointer
+    LDR     r1, =_tx_thread_current_ptr         @ Reload current thread pointer address
+    LDR     r0, [r1]                            @ Get current thread pointer
+    STR     sp, [r0, #8]                        @ Save updated thread stack pointer
 @
-@    /* Switch to the system stack.  */
-@    sp =  _tx_thread_system_stack_ptr;
+@    /* Switch to FIQ mode to use dedicated FIQ stack for ISR execution.  */
+@    /* This prevents thread stack overflow during deep interrupt nesting. */
+@    /* Note: r0-r3 on FIQ stack are now stale but will be popped on return. */
 @
-    LDR     sp, [r1]                            @ Switch to system stack
-    MOV     r10, #0                             @ Clear stack limit
+    CPS     #0x11                               @ Switch to FIQ mode
+    ADD     sp, sp, #16                         @ Pop stale r0-r3 from FIQ stack (4 regs * 4 bytes)
+    MOV     r10, #0                             @ Clear stack limit (also saved to thread stack)
 
 #ifdef TX_ENABLE_EXECUTION_CHANGE_NOTIFY
 @

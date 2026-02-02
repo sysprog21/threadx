@@ -26,9 +26,11 @@
 
 #ifdef TX_ENABLE_FIQ_SUPPORT
 SVC_MODE        =     0xD3               @ Disable IRQ/FIQ, SVC mode
+SYS_MODE        =     0xDF               @ Disable IRQ/FIQ, SYS mode
 IRQ_MODE        =     0xD2               @ Disable IRQ/FIQ, IRQ mode
 #else
 SVC_MODE        =     0x93               @ Disable IRQ, SVC mode
+SYS_MODE        =     0x9F               @ Disable IRQ, SYS mode
 IRQ_MODE        =     0x92               @ Disable IRQ, IRQ mode
 #endif
 @
@@ -156,37 +158,87 @@ __tx_thread_no_preempt_restore:
 @
 @    /* Restore interrupted thread or ISR.  */
 @
-@    /* Pickup the saved stack pointer.  */
+@    /* Switch to SYS mode and pickup the saved stack pointer.  */
 @    tmp_ptr =  _tx_thread_current_ptr -> tx_thread_stack_ptr;
 @
-    LDR     sp, [r0, #8]                        @ Restore thread stack pointer
+@    /* Load PC and CPSR from thread stack while in IRQ mode */
+    LDR     r1, [r0, #8]                    @ r1 = thread stack pointer
+    ADD     r2, r1, #24                     @ r2 = address of saved PC (skip 6 regs)
+    LDMIA   r2, {r3, r12}                   @ r3 = PC, r12 = CPSR
 @
-@   /* Recover the saved context and return to the point of interrupt.  */
+@    /* Load CPSR into SPSR_irq and PC into lr */
+    MSR     SPSR_cxsf, r12                  @ Load CPSR into SPSR_irq
+    MOV     lr, r3                          @ Load return address
 @
-    LDMIA   sp!, {r0, r10, r12, lr}         @ Recover SPSR, POI, and scratch regs
-    MSR     SPSR_cxsf, r0                   @ Put SPSR back
-    LDMIA   sp!, {r0-r3}                    @ Recover r0-r3
-    MOVS    pc, lr                          @ Return to point of interrupt
+@    /* Switch to thread's actual mode (not blindly SYS) */
+    MOV     r3, r12                         @ Copy CPSR to r3
+    AND     r3, r3, #0x1F                   @ Isolate mode bits
+    CMP     r3, #0x13                       @ Is thread in SVC mode?
+    BEQ     __tx_restore_svc_mode           @ Yes, use SVC mode
+@
+@    /* Thread in SYS/USR mode (0x1F or 0x10) */
+    CPS     #0x1F                           @ Switch to SYS mode
+    MOV     sp, r1                          @ Set SP_sys to thread stack
+    B       __tx_restore_continue
+@
+__tx_restore_svc_mode:
+@    /* Thread in SVC mode (0x13) */
+    CPS     #0x13                           @ Switch to SVC mode
+    MOV     sp, r1                          @ Set SP_svc to thread stack
+@
+__tx_restore_continue:
+    LDMIA   sp!, {r0-r3, r10, r12}          @ Restore r0-r3, r10, r12
+    ADD     sp, sp, #8                      @ Skip saved PC and CPSR (8 bytes)
+@
+@    /* Switch back to IRQ mode for proper exception return */
+    CPS     #0x12                           @ Switch to IRQ mode
+@
+@    /* Return from exception (SPSR_irq->CPSR, lr->PC) */
+    MOVS    pc, lr                          @ Return from exception
 @
 @    }
 @    else
 @    {
 __tx_thread_preempt_restore:
 @
-    LDR     sp, [r0, #8]                        @ Restore thread stack pointer
-    LDMIA   sp!, {r3, r10, r12, lr}         @ Recover temporarily saved registers
-    MOV     r1, lr                          @ Save lr (point of interrupt)
-    MOV     r2, #SVC_MODE                   @ Build SVC mode CPSR
-    MSR     CPSR_c, r2                      @ Enter SVC mode
+@    /* Restore context and convert to full thread frame for scheduler. */
+@    /* Context on thread stack: r0-r3, r10, r12, LR, SPSR (RFE-compatible). */
+@
+@    /* Determine thread's mode from saved CPSR */
+    LDR     r3, [r0, #8]                    @ r3 = thread stack pointer
+    LDR     r12, [r3, #28]                  @ r12 = saved CPSR
+    AND     r12, r12, #0x1F                 @ r12 = mode bits
+    CMP     r12, #0x13                      @ SVC mode?
+    BEQ     __tx_preempt_svc_mode
+@
+@    /* Thread was in SYS mode */
+    MOV     r12, #SYS_MODE                  @ SYS mode + interrupts disabled
+    MSR     CPSR_c, r12                     @ Switch to SYS mode
+    B       __tx_preempt_load_context
+@
+__tx_preempt_svc_mode:
+    MOV     r12, #SVC_MODE                  @ SVC mode + interrupts disabled
+    MSR     CPSR_c, r12                     @ Switch to SVC mode
+@
+__tx_preempt_load_context:
+    LDR     sp, [r0, #8]                    @ Restore thread stack pointer
+@
+@    /* Read the interrupt frame without destroying it yet. */
+@
+    LDM     sp, {r0-r3}                     @ Read r0-r3 (without popping)
+    ADD     sp, sp, #16                     @ Move past r0-r3 (4 regs * 4 bytes)
+    LDMIA   sp!, {r10, r12}                 @ Load r10, r12 (ascending order: 10 < 12)
+    LDMIA   sp!, {r1}                       @ Load LR->r1
+    LDR     r2, [sp], #4                    @ Load SPSR->r2 and advance SP
+@
+@    /* Now build full thread context in SVC mode. */
+@
+    MOV     r3, #SVC_MODE                   @ Build SVC mode CPSR
+    MSR     CPSR_c, r3                      @ Enter SVC mode
     STR     r1, [sp, #-4]!                  @ Save point of interrupt
-    STMDB   sp!, {r4-r12, lr}               @ Save upper half of registers
-    MOV     r4, r3                          @ Save SPSR in r4
-    MOV     r2, #IRQ_MODE                   @ Build IRQ mode CPSR
-    MSR     CPSR_c, r2                      @ Enter IRQ mode
-    LDMIA   sp!, {r0-r3}                    @ Recover r0-r3
-    MOV     r5, #SVC_MODE                   @ Build SVC mode CPSR
-    MSR     CPSR_c, r5                      @ Enter SVC mode
-    STMDB   sp!, {r0-r3}                    @ Save r0-r3 on thread's stack
+    STMDB   sp!, {r4-r12, lr}               @ Save upper half of registers (thread's r4-r12!)
+    MOV     r4, r2                          @ Move SPSR to r4 (thread's r4 already saved!)
+    STMDB   sp!, {r0-r3}                    @ Save r0-r3 on SVC stack
 @
     LDR     r1, =_tx_thread_current_ptr     @ Pickup address of current thread ptr
     LDR     r0, [r1]                        @ Pickup current thread pointer

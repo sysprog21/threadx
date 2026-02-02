@@ -158,36 +158,59 @@ __tx_thread_fiq_no_preempt_restore:
 @
 @    /* Restore interrupted thread or ISR.  */
 @
-@    /* Pickup the saved stack pointer.  */
+@    /* Use traditional exception return from FIQ mode */
+@    /* Stack frame: r0-r3, r10, r12, PC, CPSR */
 @    tmp_ptr =  _tx_thread_current_ptr -> tx_thread_stack_ptr;
 @
-    LDR     sp, [r0, #8]                        @ Restore thread stack pointer
+@    /* Load PC and CPSR from thread stack while in FIQ mode */
+    LDR     r1, [r0, #8]                        @ r1 = thread stack pointer
+    ADD     r2, r1, #24                         @ r2 = address of saved PC (skip 6 regs)
+    LDMIA   r2, {r3, r12}                       @ r3 = PC, r12 = CPSR
 @
-@    /* Recover the saved context and return to the point of interrupt.  */
+@    /* Load CPSR into SPSR_fiq and PC into lr */
+    MSR     SPSR_cxsf, r12                      @ Load CPSR into SPSR_fiq
+    MOV     lr, r3                              @ Load return address
 @
-    LDMIA   sp!, {r0, lr}                       @ Recover SPSR, POI, and scratch regs
-    MSR     SPSR_cxsf, r0                       @ Put SPSR back
-    LDMIA   sp!, {r0-r3}                        @ Recover r0-r3
-    MOVS    pc, lr                              @ Return to point of interrupt
+@    /* Switch to thread's actual mode (not blindly SYS) */
+    MOV     r3, r12                             @ Copy CPSR to r3
+    AND     r3, r3, #0x1F                       @ Isolate mode bits
+    CMP     r3, #0x13                           @ Is thread in SVC mode?
+    BEQ     __tx_fiq_restore_svc_mode           @ Yes, use SVC mode
+@
+@    /* Thread in SYS/USR mode (0x1F or 0x10) */
+    CPS     #0x1F                               @ Switch to SYS mode
+    MOV     sp, r1                              @ Set SP_sys to thread stack
+    B       __tx_fiq_restore_continue
+@
+__tx_fiq_restore_svc_mode:
+@    /* Thread in SVC mode (0x13) */
+    CPS     #0x13                               @ Switch to SVC mode
+    MOV     sp, r1                              @ Set SP_svc to thread stack
+@
+__tx_fiq_restore_continue:
+    LDMIA   sp!, {r0-r3, r10, r12}              @ Restore r0-r3, r10, r12
+    ADD     sp, sp, #8                          @ Skip saved PC and CPSR (8 bytes)
+@
+@    /* Switch back to FIQ mode for proper exception return */
+    CPS     #0x11                               @ Switch to FIQ mode
+@
+@    /* Return from exception (SPSR_fiq->CPSR, lr->PC) */
+    MOVS    pc, lr                              @ Return from exception
 @
 @    }
 @    else
 @    {
 __tx_thread_fiq_preempt_restore:
 @
+    CPS     #0x1F                               @ Switch to SYS mode
     LDR     sp, [r0, #8]                        @ Restore thread stack pointer
-    LDMIA   sp!, {r3, lr}                       @ Recover temporarily saved registers
-    MOV     r1, lr                              @ Save lr (point of interrupt)
+    LDM     sp, {r0-r3, r10, r12}               @ Read registers (without popping)
+    ADD     sp, sp, #24                         @ Move past saved registers
+    LDMIA   sp!, {r1, r4}                       @ r1 = LR, r4 = SPSR
     MOV     r2, #SVC_MODE                       @ Build SVC mode CPSR
     MSR     CPSR_c, r2                          @ Enter SVC mode
     STR     r1, [sp, #-4]!                      @ Save point of interrupt
     STMDB   sp!, {r4-r12, lr}                   @ Save upper half of registers
-    MOV     r4, r3                              @ Save SPSR in r4
-    MOV     r2, #FIQ_MODE                       @ Build FIQ mode CPSR
-    MSR     CPSR_c, r2                          @ Reenter FIQ mode
-    LDMIA   sp!, {r0-r3}                        @ Recover r0-r3
-    MOV     r5, #SVC_MODE                       @ Build SVC mode CPSR
-    MSR     CPSR_c, r5                          @ Enter SVC mode
     STMDB   sp!, {r0-r3}                        @ Save r0-r3 on thread's stack
     MOV     r3, #1                              @ Build interrupt stack type
     STMDB   sp!, {r3, r4}                       @ Save interrupt stack type and SPSR

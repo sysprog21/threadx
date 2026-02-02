@@ -22,6 +22,16 @@
 #include "tx_user.h"
 #endif
 
+#ifdef TX_ENABLE_FIQ_SUPPORT
+SVC_MODE        =     0xD3               @ Disable IRQ/FIQ, SVC mode
+SYS_MODE        =     0xDF               @ Disable IRQ/FIQ, SYS mode
+IRQ_MODE        =     0xD2               @ Disable IRQ/FIQ, IRQ mode
+#else
+SVC_MODE        =     0x93               @ Disable IRQ, SVC mode
+SYS_MODE        =     0x9F               @ Disable IRQ, SYS mode
+IRQ_MODE        =     0x92               @ Disable IRQ, IRQ mode
+#endif
+@
     .global     _tx_thread_system_state
     .global     _tx_thread_current_ptr
     .global     _tx_irq_processing_return
@@ -120,7 +130,7 @@ _tx_thread_context_save:
     POP     {lr}                            @ Recover ISR lr
 #endif
 
-    B       __tx_irq_processing_return      @ Continue IRQ processing 
+    B       __tx_irq_processing_return      @ Continue IRQ processing
 @
 __tx_thread_not_nested_save:
 @    }
@@ -134,26 +144,61 @@ __tx_thread_not_nested_save:
     LDR     r1, =_tx_thread_current_ptr     @ Pickup address of current thread ptr
     LDR     r0, [r1]                        @ Pickup current thread pointer
     CMP     r0, #0                          @ Is it NULL?
-    BEQ     __tx_thread_idle_system_save    @ If so, interrupt occurred in 
+    BEQ     __tx_thread_idle_system_save    @ If so, interrupt occurred in
                                             @   scheduling loop - nothing needs saving!
 @
-@    /* Save minimal context of interrupted thread.  */
+@    /* Save minimal context of interrupted thread on thread's stack.  */
+@    /* Stack frame: r0-r3, r10, r12, PC, CPSR (32 bytes) */
 @
-    MRS     r2, SPSR                        @ Pickup saved SPSR
-    SUB     lr, lr, #4                      @ Adjust point of interrupt
-    STMDB   sp!, {r2, r10, r12, lr}         @ Store other registers
+    MOV     r2, sp                          @ r2 = IRQ stack pointer (has saved r0-r3)
 @
-@    /* Save the current stack pointer in the thread's control block.  */
+@    /* Pickup SPSR and adjust return address BEFORE switching modes */
+    MRS     r3, SPSR                        @ r3 = saved SPSR (thread's CPSR)
+    SUB     lr, lr, #4                      @ Adjust point of interrupt (lr_irq)
+    MOV     r1, lr                          @ Save lr_irq in r1 (before mode switch!)
+@
+@    /* Switch to the thread's actual mode (from SPSR) to access its stack */
+@    /* r3 contains SPSR_irq = thread's saved CPSR */
+    AND     r4, r3, #0x1F                   @ r4 = thread's mode bits
+    CMP     r4, #0x13                       @ Was thread in SVC mode?
+    BEQ     __tx_save_svc_mode
+@
+@    /* Thread was in SYS/USR mode - switch to SYS mode */
+@    /* Note: USR and SYS share the same sp/lr register bank */
+    MOV     r4, #SYS_MODE                   @ SYS mode + interrupts disabled
+    MSR     CPSR_c, r4                      @ Switch to SYS mode
+    B       __tx_save_context_on_stack
+@
+__tx_save_svc_mode:
+@    /* Thread was in SVC mode - switch to SVC mode */
+    MOV     r4, #SVC_MODE                   @ SVC mode + interrupts disabled
+    MSR     CPSR_c, r4                      @ Switch to SVC mode
+@
+__tx_save_context_on_stack:
+@    /* Now sp = thread's actual stack pointer (sp_sys or sp_svc) */
+@
+@    /* Save SPSR and PC to stack */
+    STR     r3, [sp, #-4]!                  @ Push SPSR at [SP-4]
+    STR     r1, [sp, #-4]!                  @ Push lr_irq (as PC) at [SP-8]
+@
+@    /* Recover original r0-r3 from IRQ stack (r2 still points to IRQ stack) */
+    LDMIA   r2, {r0-r3}                     @ Recover thread's r0-r3 from IRQ stack
+@
+@    /* Save remaining registers */
+    STMDB   sp!, {r0-r3, r10, r12}          @ Save r0-r3, r10, r12 (final SP = base-32)
+@
+@    /* Save the thread's stack pointer in the thread's control block.  */
 @    _tx_thread_current_ptr -> tx_thread_stack_ptr =  sp;
 @
-    LDR     r1, =_tx_thread_system_stack_ptr    @ Pickup system stack pointer address
-    STR     sp, [r0, #8]                        @ Save thread stack pointer
+    LDR     r1, =_tx_thread_current_ptr     @ Reload current thread pointer address
+    LDR     r0, [r1]                        @ Get current thread pointer
+    STR     sp, [r0, #8]                    @ Save updated thread stack pointer
 @
-@    /* Switch to the system stack.  */
-@    sp =  _tx_thread_system_stack_ptr@
-@
-    LDR     sp, [r1]                            @ Switch to system stack
-    MOV     r10, #0                             @ Clear stack limit
+@    /* Switch to IRQ mode to use dedicated IRQ stack for ISR execution.  */
+    MOV     r4, #IRQ_MODE                   @ IRQ mode + interrupts disabled
+    MSR     CPSR_c, r4                      @ Switch to IRQ mode
+    ADD     sp, sp, #16                     @ Pop stale r0-r3 from IRQ stack (4 regs * 4 bytes)
+    MOV     r10, #0                         @ Clear stack limit
 
 #ifdef TX_ENABLE_EXECUTION_CHANGE_NOTIFY
 @
@@ -164,7 +209,7 @@ __tx_thread_not_nested_save:
     POP     {lr}                            @ Recover ISR lr
 #endif
 
-    B       __tx_irq_processing_return      @ Continue IRQ processing 
+    B       __tx_irq_processing_return      @ Continue IRQ processing
 @
 @    }
 @    else
@@ -173,9 +218,6 @@ __tx_thread_not_nested_save:
 __tx_thread_idle_system_save:
 @
 @    /* Interrupt occurred in the scheduling loop.  */
-@
-@    /* Not much to do here, just adjust the stack pointer, and return to IRQ 
-@       processing.  */
 @
     MOV     r10, #0                         @ Clear stack limit
 
@@ -189,10 +231,7 @@ __tx_thread_idle_system_save:
 #endif
 
     ADD     sp, sp, #16                     @ Recover saved registers
-    B       __tx_irq_processing_return      @ Continue IRQ processing  
+    B       __tx_irq_processing_return      @ Continue IRQ processing
 @
 @    }
 @}
-
-
-
