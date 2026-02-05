@@ -222,23 +222,78 @@ __tx_preempt_svc_mode:
 @
 __tx_preempt_load_context:
     LDR     sp, [r0, #8]                    @ Restore thread stack pointer
+    MOV     r0, lr                          @ Save thread's LR (SYS or SVC) in r0
+                                            @   (r0 is scratch here, holding thread ptr
+                                            @    which we reload later)
+
 @
-@    /* Read the interrupt frame without destroying it yet. */
+@    /* Read metadata from the minimal interrupt frame using indexed loads.
+@       r1-r3 are scratch at this point.
+@       Minimal frame layout: [r0][r1][r2][r3][r10][r12][PC][SPSR]
+@                              +0  +4  +8  +12 +16  +20  +24 +28            */
 @
-    LDM     sp, {r0-r3}                     @ Read r0-r3 (without popping)
-    ADD     sp, sp, #16                     @ Move past r0-r3 (4 regs * 4 bytes)
-    LDMIA   sp!, {r10, r12}                 @ Load r10, r12 (ascending order: 10 < 12)
-    LDMIA   sp!, {r1}                       @ Load LR->r1
-    LDR     r2, [sp], #4                    @ Load SPSR->r2 and advance SP
+    LDR     r1, [sp, #24]                   @ r1 = PC (point of interrupt)
+    LDR     r2, [sp, #28]                   @ r2 = SPSR
+    MOV     r3, sp                          @ r3 = minimal frame base address
+    LDR     r10, [sp, #16]                  @ r10 = thread's r10 (from frame)
+    LDR     r12, [sp, #20]                  @ r12 = thread's r12 (from frame)
 @
-@    /* Now build full thread context in SVC mode. */
+@    /* Advance thread's SP past the consumed minimal frame. */
+    ADD     sp, sp, #32                     @ Thread's SP restored to pre-interrupt value
 @
-    MOV     r3, #SVC_MODE                   @ Build SVC mode CPSR
-    MSR     CPSR_c, r3                      @ Enter SVC mode
-    STR     r1, [sp, #-4]!                  @ Save point of interrupt
-    STMDB   sp!, {r4-r12, lr}               @ Save upper half of registers (thread's r4-r12!)
-    MOV     r4, r2                          @ Move SPSR to r4 (thread's r4 already saved!)
-    STMDB   sp!, {r0-r3}                    @ Save r0-r3 on SVC stack
+@    /* Switch to SVC mode to build the full interrupt frame.
+@       Use CPS to avoid consuming a register for the mode constant.
+@       Interrupts remain disabled (I/F bits unchanged by CPS). */
+#ifdef TX_ENABLE_FIQ_SUPPORT
+    CPSID   if, #0x13                       @ Disable IRQ+FIQ, enter SVC mode
+#else
+    CPSID   i, #0x13                        @ Disable IRQ, enter SVC mode
+#endif
+@
+@    /* Build the full interrupt frame on the SVC stack.
+@       The frame must be: [r0-r12, lr, pc] = 15 registers = 60 bytes.
+@       For SVC-mode threads, this frame overlaps with the minimal frame in
+@       memory (same stack), so r0-r3 must be read from the frame BEFORE
+@       callee-saved writes overwrite those addresses.
+@
+@       Calculated SP:
+@       Old SP (r3) points to base of minimal frame.
+@       New SP should be (Old SP + 32) - 60 = Old SP - 28.
+@       We use r3 to calculate this to ensure correctness regardless of
+@       whether we came from SYS or SVC mode (sp is banked). */
+@
+    SUB     sp, r3, #28                     @ Allocate full frame (15 regs)
+@
+@    /* Save the thread's LR (saved in r0) to the stack.
+@       We do this early to free up r0 for use as scratch in the copy loop.
+@       Offset 52 corresponds to LR slot. */
+    STR     r0, [sp, #52]                   @ Save LR
+@
+@    /* Fill r0-r3 from minimal frame FIRST (before overlap can occur). */
+    LDR     r0, [r3, #0]                    @ Thread's r0
+    STR     r0, [sp, #0]                    @ -> frame slot r0
+    LDR     r0, [r3, #4]                    @ Thread's r1
+    STR     r0, [sp, #4]                    @ -> frame slot r1
+    LDR     r0, [r3, #8]                    @ Thread's r2
+    STR     r0, [sp, #8]                    @ -> frame slot r2
+    LDR     r0, [r3, #12]                   @ Thread's r3
+    STR     r0, [sp, #12]                   @ -> frame slot r3
+@
+@    /* Fill callee-saved registers from physical registers. */
+    STR     r4, [sp, #16]                   @ r4  (callee-saved, in physical reg)
+    STR     r5, [sp, #20]                   @ r5
+    STR     r6, [sp, #24]                   @ r6
+    STR     r7, [sp, #28]                   @ r7
+    STR     r8, [sp, #32]                   @ r8
+    STR     r9, [sp, #36]                   @ r9
+    STR     r10, [sp, #40]                  @ r10 (loaded from frame)
+    STR     r11, [sp, #44]                  @ r11 (callee-saved, in physical reg)
+    STR     r12, [sp, #48]                  @ r12 (loaded from frame)
+@   STR     lr, [sp, #52]                   @ (LR already saved above)
+    STR     r1, [sp, #56]                   @ pc  (point of interrupt)
+@
+@    /* Prepare SPSR in r4 for the type/SPSR header push below. */
+    MOV     r4, r2                          @ r4 = SPSR
 @
     LDR     r1, =_tx_thread_current_ptr     @ Pickup address of current thread ptr
     LDR     r0, [r1]                        @ Pickup current thread pointer
