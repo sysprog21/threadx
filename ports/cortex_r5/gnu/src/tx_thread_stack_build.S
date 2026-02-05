@@ -161,11 +161,7 @@ _tx_thread_stack_build:
 @
     STR     r2, [r0, #8]                    @ Save stack pointer in thread's
                                             @   control block
-#ifdef __THUMB_INTERWORK
     BX      lr                              @ Return to caller
-#else
-    MOV     pc, lr                          @ Return to caller
-#endif
 @}
 
 

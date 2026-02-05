@@ -100,10 +100,6 @@ _tx_thread_interrupt_control:
 @
     MSR     CPSR_c, r1                  @ Setup new CPSR
     BIC     r0, r3, r2                  @ Return previous interrupt mask
-#ifdef __THUMB_INTERWORK
     BX      lr                          @ Return to caller
-#else
-    MOV     pc, lr                      @ Return to caller
-#endif
 @}
 

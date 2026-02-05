@@ -90,10 +90,6 @@ _tx_thread_interrupt_restore:
     DMB                                         @ Memory barrier (release semantics)
     MSR     CPSR_c, r0                          @ Setup new CPSR
     ISB                                         @ Synchronize context
-#ifdef __THUMB_INTERWORK
     BX      lr                                  @ Return to caller
-#else
-    MOV     pc, lr                              @ Return to caller
-#endif
 @}
 

@@ -98,11 +98,7 @@ _tx_thread_interrupt_disable:
     DMB                                         @ Memory barrier (acquire semantics)
     ISB                                         @ Flush pipeline
 
-#ifdef __THUMB_INTERWORK
     BX      lr                                  @ Return to caller
-#else
-    MOV     pc, lr                              @ Return to caller
-#endif
 @}
 
 

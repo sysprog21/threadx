@@ -114,7 +114,7 @@ _tx_thread_vectored_context_save:
     POP     {lr}                                @ Recover ISR lr
 #endif
 
-    MOV     pc, lr                              @ Return to caller
+    BX      lr                                  @ Return to caller
 @
 __tx_thread_not_nested_save:
 @    }
@@ -154,7 +154,7 @@ __tx_thread_not_nested_save:
     POP     {lr}                                @ Recover ISR lr
 #endif
 
-    MOV     pc, lr                              @ Return to caller
+    BX      lr                                  @ Return to caller
 @
 @    }
 @    else
@@ -179,7 +179,7 @@ __tx_thread_idle_system_save:
 #endif
 
     ADD     sp, sp, #32                         @ Recover saved registers
-    MOV     pc, lr                              @ Return to caller
+    BX      lr                                  @ Return to caller
 @
 @    }
 @}

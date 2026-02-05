@@ -190,11 +190,7 @@ _tx_skip_solicited_vfp_restore:
     LDMIA   sp!, {r4-r11, lr}                   @ Return to thread synchronously
     MSR     CPSR_cxsf, r0                       @ Recover CPSR
 @
-#ifdef __THUMB_INTERWORK
     BX      lr                                  @ Return to caller
-#else
-    MOV     pc, lr                              @ Return to caller
-#endif
 @
 @}
 @

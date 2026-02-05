@@ -99,10 +99,6 @@ _tx_thread_fiq_nesting_end:
     ORR     r0, r0, #FIQ_MODE_BITS              @ Build IRQ mode CPSR
     MSR     CPSR_c, r0                          @ Reenter IRQ mode
 
-#ifdef __THUMB_INTERWORK
     BX      r3                                  @ Return to caller
-#else
-    MOV     pc, r3                              @ Return to caller
-#endif
 @}
 

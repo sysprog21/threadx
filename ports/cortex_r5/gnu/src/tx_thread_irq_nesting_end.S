@@ -98,10 +98,6 @@ _tx_thread_irq_nesting_end:
     BIC     r0, r0, #MODE_MASK                  @ Clear mode bits
     ORR     r0, r0, #IRQ_MODE_BITS              @ Build IRQ mode CPSR
     MSR     CPSR_c, r0                          @ Reenter IRQ mode
-#ifdef __THUMB_INTERWORK
     BX      r3                                  @ Return to caller
-#else
-    MOV     pc, r3                              @ Return to caller
-#endif
 @}
 

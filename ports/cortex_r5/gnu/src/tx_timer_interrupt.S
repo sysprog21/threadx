@@ -261,11 +261,7 @@ __tx_timer_not_ts_expiration:
 @
 __tx_timer_nothing_expired:
 @
-#ifdef __THUMB_INTERWORK
     BX      lr                                  @ Return to caller
-#else
-    MOV     pc, lr                              @ Return to caller
-#endif
 @
 @}
 
