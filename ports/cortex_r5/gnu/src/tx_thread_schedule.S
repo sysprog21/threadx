@@ -177,6 +177,17 @@ _tx_skip_interrupt_vfp_restore:
     LDMIA   sp!, {r0-r12, lr, pc}^              @ Return to point of thread interrupt
 @
 _tx_solicited_return:
+@
+@    /* Clear the exclusive monitor.  This is required to prevent a thread that
+@     * performed LDREX before yielding (via tx_thread_relinquish or blocking)
+@     * from having a subsequent STREX succeed without re-checking memory.
+@     * Exception entry clears the monitor automatically, so only the solicited
+@     * (voluntary) path needs explicit CLREX.
+@     * Reference: ARMv7-R ARM, Section A3.4.4 (Exclusive monitors and
+@     * context switches).
+@     */
+@
+    CLREX
 #ifdef TX_ENABLE_VFP_SUPPORT
     LDR     r1, [r0, #144]                      @ Pickup the VFP enabled flag
     CMP     r1, #0                              @ Is the VFP enabled?
