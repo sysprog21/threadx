@@ -21,7 +21,40 @@
 #ifdef TX_INCLUDE_USER_DEFINE_FILE
 #include "tx_user.h"
 #endif
-
+@
+@/**************************************************************************/
+@/*                                                                        */
+@/*  GIC Deferred EOI Support                                              */
+@/*                                                                        */
+@/*  For GIC-based platforms with level-triggered interrupts, there is a   */
+@/*  race window between EOIR write and CPSID where the interrupt can      */
+@/*  re-trigger if the peripheral still asserts. This feature defers the   */
+@/*  EOIR write until AFTER CPSID, closing the race window.                */
+@/*                                                                        */
+@/*  Enable by defining TX_GIC_DEFERRED_EOI in tx_user.h                   */
+@/*                                                                        */
+@/*  CONSTRAINTS:                                                          */
+@/*  - Single-core only (uses global _tx_gic_iar variable)                 */
+@/*  - NOT compatible with TX_ENABLE_IRQ_NESTING                           */
+@/*  - Requires TX_ENABLE_GIC_SUPPORT in tx_initialize_low_level.S         */
+@/*  - GICv2 only (GICv3 uses different register interface)                */
+@/*                                                                        */
+@/**************************************************************************/
+@
+#ifdef TX_GIC_DEFERRED_EOI
+@
+@/* GIC CPU Interface address - use same macro as tx_initialize_low_level.S */
+#ifndef TX_GIC_CPU_INTERFACE_BASE
+#define TX_GIC_CPU_INTERFACE_BASE   0xF9001000  @ Default: ZynqMP RPU
+#endif
+GICC_EOIR_OFFSET    =   0x10                    @ EOI register offset
+TX_GIC_SPURIOUS     =   1020                    @ GICv2: 1020-1023 are special
+@
+    .global     _tx_gic_iar                     @ IAR value from IRQ handler
+@
+#endif
+@
+    .arch   armv7-r                         @ ARMv7-R for Cortex-R5
     .arm
 
 #ifdef TX_ENABLE_FIQ_SUPPORT
@@ -101,6 +134,35 @@ _tx_thread_context_restore:
     CPSID   if                              @ Disable IRQ and FIQ interrupts
 #else
     CPSID   i                               @ Disable IRQ interrupts
+#endif
+@
+#ifdef TX_GIC_DEFERRED_EOI
+@
+@    /* GIC Deferred EOI: Write EOIR now that interrupts are disabled.
+@       This closes the race window between handler completion and CPSID.
+@       _tx_gic_iar must be set by __tx_irq_handler before context_save.
+@       The IRQ handler in tx_initialize_low_level.S must NOT write EOIR
+@       when TX_GIC_DEFERRED_EOI is defined.
+@
+@       CRITICAL: After EOI, we invalidate _tx_gic_iar (set to 1023/spurious)
+@       to prevent duplicate EOIs on non-IRQ context switches (e.g., thread
+@       voluntarily yielding via tx_thread_sleep, mutex wait, etc.). */
+@
+    STMDB   sp!, {r0-r3}                    @ Save scratch registers
+    DSB     SY                              @ Ensure all peripheral writes complete
+    LDR     r0, =_tx_gic_iar
+    LDR     r1, [r0]                        @ Load saved IAR value
+    UBFX    r2, r1, #0, #10                 @ Extract interrupt ID (bits 0-9)
+    CMP     r2, #TX_GIC_SPURIOUS
+    BGE     __tx_gic_skip_eoir              @ ID >= 1020 is spurious, skip EOIR
+    LDR     r3, =TX_GIC_CPU_INTERFACE_BASE
+    STR     r1, [r3, #GICC_EOIR_OFFSET]     @ Write EOIR with full IAR value
+    DSB     SY                              @ Ensure EOIR write completes
+@   /* Invalidate _tx_gic_iar to prevent duplicate EOI on next context switch */
+    MOV     r1, #0x3FF                      @ 1023 = spurious (invalid for EOI)
+    STR     r1, [r0]                        @ Clear saved IAR
+__tx_gic_skip_eoir:
+    LDMIA   sp!, {r0-r3}                    @ Restore scratch registers
 #endif
 
 #ifdef TX_ENABLE_EXECUTION_CHANGE_NOTIFY

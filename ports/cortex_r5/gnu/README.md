@@ -1864,3 +1864,301 @@ If reconfiguring hardware from lockstep → SMP:
 ThreadX requires a periodic interrupt source to manage all time-slicing, thread sleeps, timeouts, and application timers. Without such a timer interrupt source, these services are not functional but the remainder of ThreadX will still run.
 
 To add the timer interrupt processing, simply make a call to `_tx_timer_interrupt` in the IRQ processing. An example of this can be found in the file `tx_initialize_low_level.S` for the demonstration system.
+
+## 11. GIC (Generic Interrupt Controller) Support
+
+The Cortex-R5 port includes optional GIC (Generic Interrupt Controller) initialization and IRQ dispatch support. This is essential for systems using ARM GIC v1/v2 interrupt controllers, such as the Xilinx Zynq UltraScale+ RPU.
+
+**ARM Reference**: GIC Architecture Specification (IHI 0048B)
+
+### 11.1 Enabling GIC Support
+
+To enable GIC support, define `TX_ENABLE_GIC_SUPPORT` when compiling `tx_initialize_low_level.S`:
+
+```bash
+arm-none-eabi-gcc -DTX_ENABLE_GIC_SUPPORT -c tx_initialize_low_level.S
+```
+
+Optional defines:
+
+| Define | Default | Description |
+|--------|---------|-------------|
+| `TX_GIC_DISTRIBUTOR_BASE` | 0xF9000000 | GIC Distributor (GICD) base address |
+| `TX_GIC_CPU_INTERFACE_BASE` | 0xF9001000 | GIC CPU Interface (GICC) base address |
+| `TX_GIC_MAX_INTERRUPTS` | 192 | Maximum interrupt count for handler table |
+| `TX_GIC_TIMER_IRQ` | 29 | Interrupt ID for system timer (PPI #29) |
+| `TX_GIC_USE_HANDLER_TABLE` | undefined | Enable handler table dispatch |
+
+### 11.2 GIC Base Address Discovery
+
+GIC base addresses can be discovered via:
+
+**Option 1: CBAR Register (if implemented)**
+```assembly
+MRC     p15, 4, r0, c15, c0, 0    @ Read CBAR
+@ GICD = CBAR + 0x1000
+@ GICC = CBAR + 0x2000
+```
+
+**Option 2: Platform-Specific (default)**
+Override via compiler defines:
+```bash
+-DTX_GIC_DISTRIBUTOR_BASE=0xF9000000 -DTX_GIC_CPU_INTERFACE_BASE=0xF9001000
+```
+
+Common platform addresses:
+
+| Platform | GICD Base | GICC Base |
+|----------|-----------|-----------|
+| Zynq UltraScale+ RPU | 0xF9000000 | 0xF9001000 |
+| Zynq-7000 | 0xF8F01000 | 0xF8F00100 |
+| TI K2x/AM6x | Varies | Varies |
+
+### 11.3 GIC Initialization
+
+Call `_tx_gic_initialize()` before enabling interrupts (typically in `tx_application_define` or early startup):
+
+```c
+extern void _tx_gic_initialize(void);
+
+void tx_application_define(void *first_unused_memory)
+{
+    /* Initialize GIC before creating threads */
+    _tx_gic_initialize();
+
+    /* Enable timer interrupt */
+    _tx_gic_enable_irq(TX_GIC_TIMER_IRQ);
+    _tx_gic_set_priority(TX_GIC_TIMER_IRQ, 0x80);
+
+    /* Create threads... */
+}
+```
+
+The initialization sequence:
+1. Disable distributor
+2. Read GICD_TYPER to determine interrupt count
+3. Disable all interrupts (GICD_ICENABLER)
+4. Clear all pending interrupts (GICD_ICPENDR)
+5. Clear all active interrupts (GICD_ICACTIVER)
+6. Set default priority (0x80) for all interrupts
+7. Set CPU target to CPU0 for all SPIs
+8. Initialize CPU interface (PMR=0xFF, BPR=3)
+9. Enable distributor and CPU interface
+
+### 11.4 GIC API Functions
+
+**Initialization:**
+```c
+void _tx_gic_initialize(void);       /* Initialize GIC distributor and CPU interface */
+```
+
+**Interrupt Control:**
+```c
+void _tx_gic_enable_irq(uint32_t irq_id);           /* Enable specific interrupt */
+void _tx_gic_disable_irq(uint32_t irq_id);          /* Disable specific interrupt */
+void _tx_gic_set_priority(uint32_t irq_id, uint32_t priority);  /* Set priority (0=highest) */
+```
+
+**Software Generated Interrupts (SGIs):**
+```c
+void _tx_gic_send_sgi(uint32_t sgi_id, uint32_t filter, uint32_t target_list);
+/* filter: 0=use target_list, 1=all except self, 2=only self */
+/* target_list: CPU bitmask (when filter=0) */
+```
+
+**Handler Table (when TX_GIC_USE_HANDLER_TABLE defined):**
+```c
+void* _tx_gic_register_handler(uint32_t irq_id, void (*handler)(uint32_t));
+/* Returns previous handler, or NULL if none */
+```
+
+### 11.5 IRQ Dispatch Modes
+
+**Mode 1: Direct Dispatch (default)**
+
+The IRQ handler checks the interrupt ID and calls the appropriate handler directly:
+
+```assembly
+CMP     r0, #TX_GIC_TIMER_IRQ
+BNE     _gic_not_timer
+BL      _tx_timer_interrupt
+```
+
+Add additional handlers by modifying `__tx_irq_processing_return` in `tx_initialize_low_level.S`.
+
+**Mode 2: Handler Table Dispatch**
+
+Enable with `-DTX_GIC_USE_HANDLER_TABLE`. Provides a function pointer table for dynamic handler registration:
+
+```c
+/* Handler signature */
+typedef void (*gic_handler_t)(uint32_t irq_id);
+
+/* Register handlers */
+_tx_gic_register_handler(UART_IRQ, uart_isr);
+_tx_gic_register_handler(DMA_IRQ, dma_isr);
+_tx_gic_register_handler(TX_GIC_TIMER_IRQ, timer_isr);
+```
+
+Handler table size is `TX_GIC_MAX_INTERRUPTS * 4` bytes (default: 768 bytes for 192 interrupts).
+
+### 11.6 IRQ Handler Flow
+
+```
+IRQ Exception
+    │
+    ├─► _tx_thread_context_save         (save thread context)
+    │
+    ├─► Read GICC_IAR                   (acknowledge interrupt, get ID)
+    │       │
+    │       ├─► ID >= 1020?  ──► Yes ──► Spurious, exit
+    │       │
+    │       └─► ID < 1020?  ──► Dispatch to handler
+    │               │
+    │               └─► Write GICC_EOIR (signal completion)
+    │
+    └─► _tx_thread_context_restore      (restore context, may switch threads)
+```
+
+**CRITICAL: IAR/EOIR Pairing**
+
+The value written to GICC_EOIR **must** be the exact value read from GICC_IAR, including the CPU ID bits (bits 12:10) for SGIs. Failure to do so causes interrupt handling errors.
+
+### 11.7 Timer Interrupt Configuration
+
+The default timer interrupt ID is PPI #29 (Private Timer). Override for your platform:
+
+```bash
+-DTX_GIC_TIMER_IRQ=27    # Example: Use IRQ 27 for timer
+```
+
+Common timer interrupt IDs:
+
+| Timer Type | Typical IRQ ID | Notes |
+|------------|----------------|-------|
+| ARM Private Timer | 29 (PPI #13) | Per-core timer |
+| ARM Global Timer | 27 (PPI #11) | Shared timer |
+| Platform Timer | Varies | Consult SoC TRM |
+
+### 11.8 Example: Complete GIC Setup
+
+```c
+/* tx_application_define.c */
+
+extern void _tx_gic_initialize(void);
+extern void _tx_gic_enable_irq(unsigned int irq);
+extern void _tx_gic_set_priority(unsigned int irq, unsigned int prio);
+
+#define TIMER_IRQ       29      /* Private Timer PPI */
+#define UART0_IRQ       53      /* UART0 SPI (example) */
+
+void tx_application_define(void *first_unused_memory)
+{
+    /* Initialize GIC */
+    _tx_gic_initialize();
+
+    /* Configure timer interrupt */
+    _tx_gic_set_priority(TIMER_IRQ, 0x80);
+    _tx_gic_enable_irq(TIMER_IRQ);
+
+    /* Configure UART interrupt */
+    _tx_gic_set_priority(UART0_IRQ, 0xA0);  /* Lower priority than timer */
+    _tx_gic_enable_irq(UART0_IRQ);
+
+    /* Start platform timer hardware (vendor-specific) */
+    /* Example: configure_arm_private_timer(TICK_RATE_HZ); */
+
+    /* Create application threads... */
+}
+```
+
+### 11.9 Common Mistakes
+
+1. **Enabling interrupts before GIC init**: Always call `_tx_gic_initialize()` first
+2. **Missing EOIR write**: Causes interrupt to remain pending, system hangs
+3. **Wrong EOIR value**: Write exact IAR value, not just the interrupt ID
+4. **Wrong base addresses**: Verify GICD/GICC addresses for your platform
+5. **Timer not enabled in hardware**: GIC enable is separate from timer peripheral enable
+
+### 11.10 GIC and FIQ Interaction
+
+The GIC implementation routes all interrupts through the IRQ handler by default:
+
+**Current Configuration:**
+- All interrupts default to **Group 0** (GICD_IGROUPR registers not modified)
+- **FIQEn = 0** in GICC_CTLR (bit 3 not set), meaning Group 0 signals as IRQ
+- Result: All GIC-managed interrupts use the IRQ path with GIC dispatch
+
+**FIQ Handler Independence:**
+The FIQ handler (`__tx_fiq_handler`) operates independently of GIC:
+- No GIC IAR/EOIR acknowledgment in FIQ path
+- Suitable for dedicated FIQ sources not routed through GIC
+- Used for latency-critical interrupts requiring minimal overhead
+
+**Using GIC-Managed FIQ (Advanced):**
+To route Group 0 interrupts to FIQ:
+1. Set FIQEn bit: Modify `_tx_gic_initialize` to write `0x0F` to GICC_CTLR (instead of 0x07)
+2. Add GIC dispatch to FIQ handler: Read GICC_AIAR (0x20), dispatch, write GICC_AEOIR (0x24)
+3. Configure interrupt groups: Write GICD_IGROUPR to assign interrupts to Group 0 (FIQ) or Group 1 (IRQ)
+
+**Typical ZynqMP RPU Usage:**
+Most applications use all interrupts through IRQ. The default configuration is appropriate for:
+- Timer interrupts (PPI #29 or TTC)
+- UART, SPI, I2C peripherals
+- DMA completion interrupts
+- Inter-processor interrupts (IPI)
+
+If dedicated low-latency FIQ is needed for a specific source not requiring GIC features, use `TX_ENABLE_FIQ_SUPPORT` with direct FIQ pin routing, bypassing GIC entirely
+
+### 11.11 GIC Deferred EOI (Level-Triggered Interrupt Fix)
+
+For platforms with level-triggered interrupts, there is a race window between the EOIR write in the IRQ handler and the CPSID in `_tx_thread_context_restore`. If the peripheral still asserts the interrupt signal, the interrupt can re-trigger before interrupts are masked.
+
+**The Race Window:**
+```
+Normal flow:
+  Handler → EOIR write → ... → context_restore → CPSID
+                          ↑
+            Race window: interrupt can re-trigger before CPSID
+```
+
+**Deferred EOI Solution:**
+```
+Deferred EOI:
+  Handler → save IAR → ... → context_restore → CPSID → EOIR write
+                                                        ↑
+                                          Safe: IRQs already masked
+```
+
+**Enabling Deferred EOI:**
+
+In `tx_user.h`:
+```c
+#define TX_GIC_DEFERRED_EOI
+
+/* Optional: Override GIC base address if not ZynqMP */
+#define TX_GIC_CPU_INTERFACE_BASE    0xF9001000
+```
+
+**Constraints:**
+- **Single-core only**: Uses global `_tx_gic_iar` variable
+- **NOT compatible with TX_ENABLE_IRQ_NESTING**: Build will fail with error
+- **Requires TX_ENABLE_GIC_SUPPORT**: Must be enabled in tx_initialize_low_level.S
+- **GICv2 only**: GICv3 uses different register interface
+
+**How It Works:**
+1. IRQ handler reads GICC_IAR and saves it to `_tx_gic_iar`
+2. Handler runs normally but does NOT write EOIR
+3. `_tx_thread_context_restore` executes CPSID (disabling interrupts)
+4. After CPSID, deferred EOIR block writes the saved IAR to GICC_EOIR
+5. Interrupt is now safely completed with no race window
+
+**When to Use:**
+- Level-triggered interrupts that remain asserted during handler execution
+- Platforms where peripheral interrupt clear has latency
+- Systems experiencing spurious interrupt storms
+
+**When NOT to Use:**
+- Edge-triggered interrupts (no race condition)
+- Systems requiring IRQ nesting (incompatible)
+- Multi-core systems (global variable not core-safe)
