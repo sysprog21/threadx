@@ -159,20 +159,21 @@ __tx_thread_not_nested_save:
 @
 @    /* Switch to the thread's actual mode (from SPSR) to access its stack */
 @    /* r3 contains SPSR_irq = thread's saved CPSR */
-    AND     r4, r3, #0x1F                   @ r4 = thread's mode bits
-    CMP     r4, #0x13                       @ Was thread in SVC mode?
+    AND     r0, r3, #0x1F                   @ r0 = thread's mode bits (r0 is scratch;
+                                            @   restored from IRQ stack by LDMIA below)
+    CMP     r0, #0x13                       @ Was thread in SVC mode?
     BEQ     __tx_save_svc_mode
 @
 @    /* Thread was in SYS/USR mode - switch to SYS mode */
 @    /* Note: USR and SYS share the same sp/lr register bank */
-    MOV     r4, #SYS_MODE                   @ SYS mode + interrupts disabled
-    MSR     CPSR_c, r4                      @ Switch to SYS mode
+    MOV     r0, #SYS_MODE                   @ SYS mode + interrupts disabled
+    MSR     CPSR_c, r0                      @ Switch to SYS mode
     B       __tx_save_context_on_stack
 @
 __tx_save_svc_mode:
 @    /* Thread was in SVC mode - switch to SVC mode */
-    MOV     r4, #SVC_MODE                   @ SVC mode + interrupts disabled
-    MSR     CPSR_c, r4                      @ Switch to SVC mode
+    MOV     r0, #SVC_MODE                   @ SVC mode + interrupts disabled
+    MSR     CPSR_c, r0                      @ Switch to SVC mode
 @
 __tx_save_context_on_stack:
 @    /* Now sp = thread's actual stack pointer (sp_sys or sp_svc) */
@@ -195,8 +196,8 @@ __tx_save_context_on_stack:
     STR     sp, [r0, #8]                    @ Save updated thread stack pointer
 @
 @    /* Switch to IRQ mode to use dedicated IRQ stack for ISR execution.  */
-    MOV     r4, #IRQ_MODE                   @ IRQ mode + interrupts disabled
-    MSR     CPSR_c, r4                      @ Switch to IRQ mode
+    MOV     r0, #IRQ_MODE                   @ IRQ mode + interrupts disabled
+    MSR     CPSR_c, r0                      @ Switch to IRQ mode
     ADD     sp, sp, #16                     @ Pop stale r0-r3 from IRQ stack (4 regs * 4 bytes)
     MOV     r10, #0                         @ Clear stack limit
 
