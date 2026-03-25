@@ -1,0 +1,23 @@
+test/smp/regression/threadx_smp_time_slice_test.c
+  91a9e16ab76ca2aa 246-251
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.17",
+  "base_commit_sha": "21bce274a323d8c1b52a31e871e68cd0f6b2af79",
+  "prompts": {
+    "91a9e16ab76ca2aa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5272d416-963d-4356-b397-ba1d31f06d41",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Jim Huang <jserv@ccns.ncku.edu.tw>",
+      "messages": [],
+      "total_additions": 6,
+      "total_deletions": 2,
+      "accepted_lines": 6,
+      "overriden_lines": 0
+    }
+  }
+}
