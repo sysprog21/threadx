@@ -243,8 +243,12 @@ UINT    status;
     status += tx_thread_resume(&thread_31g);
     status += tx_thread_resume(&thread_31h);
 
-    /* Now sleep for 20 ticks to let see if all the threads execute.  */
-    tx_thread_sleep(20);
+    /* Sleep long enough for time-slicing to rotate all 8 threads across
+       the available SMP cores.  On CI runners under load the linux SMP
+       port may need extra wall-clock time because host-thread scheduling
+       is non-deterministic.  100 ticks is ~5x headroom over the minimum
+       needed for 8 threads on 3 cores with time-slice=1.  */
+    tx_thread_sleep(100);
     
     /* Now check and make sure all the threads ran.  */
     if ((status != TX_SUCCESS) || (thread_31a_counter == 0) || (thread_31b_counter == 0) || (thread_31c_counter == 0) || (thread_31d_counter == 0) ||
